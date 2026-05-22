@@ -1,0 +1,197 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+
+const app = express();
+const PORT = 5000;
+const ADMIN_KEY = 'admin123'; // Change this for security
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// 1. MongoDB Setup
+mongoose.connect('mongodb://127.0.0.1:27017/minicrm', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log("MongoDB Connected"))
+.catch(err => console.log("MongoDB Error:", err));
+
+const followupSchema = new mongoose.Schema({
+  note: String,
+  date: {type: Date, default: Date.now}
+});
+
+const leadSchema = new mongoose.Schema({
+  name: {type: String, required: true},
+  email: {type: String, required: true, unique: true},
+  source: {type: String, default: 'Website'},
+  status: {type: String, enum: ['new', 'contacted', 'converted'], default: 'new'},
+  notes: {type: String, default: ''},
+  followups: [followupSchema],
+  createdAt: {type: Date, default: Date.now}
+});
+
+const Lead = mongoose.model('Lead', leadSchema);
+
+// 2. Admin Middleware - Secure access
+const checkAdmin = (req, res, next) => {
+  if(req.headers['x-admin-key']!== ADMIN_KEY && req.query.key!== ADMIN_KEY)
+    return res.status(401).send('<h3>Unauthorized - Add?key=admin123 to URL</h3>');
+  next();
+}
+
+// 3. API Routes - CRUD
+
+// C: CREATE Lead - Public
+app.post('/api/leads', async (req, res) => {
+  try {
+    const {name, email, source, notes} = req.body;
+    if(!name ||!email) return res.status(400).json({error: 'Name and Email required'});
+    const lead = new Lead({name, email, source, notes});
+    await lead.save();
+    res.redirect('/?msg=Lead+submitted+successfully');
+  } catch(err) {
+    if(err.code === 11000) return res.redirect('/?msg=Email+already+exists');
+    res.status(400).json({error: err.message});
+  }
+});
+
+// R: READ - All leads - Admin
+app.get('/api/leads', checkAdmin, async (req, res) => {
+  const {status} = req.query;
+  const filter = status && status!== 'all'? {status} : {};
+  const leads = await Lead.find(filter).sort({createdAt: -1});
+  res.json(leads);
+});
+
+// U: UPDATE - Status + Followup - Admin
+app.post('/api/leads/:id/update', checkAdmin, async (req, res) => {
+  const {status, note} = req.body;
+  const update = {status};
+  if(note) update.$push = {followups: {note, date: new Date()}};
+  await Lead.findByIdAndUpdate(req.params.id, update);
+  res.redirect('/admin?key=' + ADMIN_KEY + '&msg=Updated');
+});
+
+// D: DELETE Lead - Admin
+app.get('/api/leads/:id/delete', checkAdmin, async (req, res) => {
+  await Lead.findByIdAndDelete(req.params.id);
+  res.redirect('/admin?key=' + ADMIN_KEY + '&msg=Deleted');
+});
+
+// 4. Frontend Routes - All HTML in 1 file
+
+// Public Contact Form
+app.get('/', async (req, res) => {
+  const msg = req.query.msg || '';
+  res.send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Mini CRM - Contact</title>
+    <style>
+      body {font-family: Arial; background: #f4f6f8; margin: 0; padding: 20px;}
+     .container {max-width: 600px; margin: 50px auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);}
+      h1 {color: #2c3e50; text-align: center;}
+      nav {text-align: center; margin-bottom: 20px;}
+      nav a {margin: 0 10px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px;}
+      input, select, textarea {display: block; width: 100%; margin: 15px 0; padding: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
+      button {width: 100%; padding: 12px; background: #27ae60; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px;}
+     .msg {background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; margin-bottom: 15px; text-align: center;}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Client Lead Management System</h1>
+      <nav>
+        <a href="/">Contact Form</a>
+        <a href="/admin?key=${ADMIN_KEY}">Admin Dashboard</a>
+      </nav>
+      ${msg? `<div class="msg">${decodeURIComponent(msg)}</div>` : ''}
+      <form action="/api/leads" method="POST">
+        <h2>Get in Touch</h2>
+        <input name="name" placeholder="Full Name" required/>
+        <input name="email" type="email" placeholder="Email" required/>
+        <select name="source">
+          <option>Website</option><option>LinkedIn</option><option>Referral</option><option>Ads</option>
+        </select>
+        <textarea name="notes" placeholder="Your Message/Requirements"></textarea>
+        <button type="submit">Submit Lead</button>
+      </form>
+    </div>
+  </body>
+  </html>
+  `);
+});
+
+// Admin Dashboard - CRUD UI
+app.get('/admin', checkAdmin, async (req, res) => {
+  const leads = await Lead.find().sort({createdAt: -1});
+  const msg = req.query.msg || '';
+
+  let rows = leads.map(lead => `
+    <tr>
+      <td>${lead.name}</td>
+      <td>${lead.email}</td>
+      <td>${lead.source}</td>
+      <td>${new Date(lead.createdAt).toLocaleDateString()}</td>
+      <td>${lead.followups.length}</td>
+      <td>
+        <form action="/api/leads/${lead._id}/update?key=${ADMIN_KEY}" method="POST" style="display:inline;">
+          <select name="status" onchange="this.form.submit()">
+            <option value="new" ${lead.status==='new'?'selected':''}>new</option>
+            <option value="contacted" ${lead.status==='contacted'?'selected':''}>contacted</option>
+            <option value="converted" ${lead.status==='converted'?'selected':''}>converted</option>
+          </select>
+          <input type="hidden" name="note" value="Status changed to ${lead.status} on ${new Date().toLocaleDateString()}"/>
+        </form>
+      </td>
+      <td><a href="/api/leads/${lead._id}/delete?key=${ADMIN_KEY}" onclick="return confirm('Delete this lead?')" style="color:red;">Delete</a></td>
+    </tr>
+  `).join('');
+
+  res.send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Mini CRM - Admin</title>
+    <style>
+      body {font-family: Arial; background: #f4f6f8; margin: 0; padding: 20px;}
+     .container {max-width: 1200px; margin: auto; background: white; padding: 25px; border-radius: 10px;}
+      h1 {color: #2c3e50;}
+      nav a {margin: 0 10px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px;}
+      table {width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px;}
+      th, td {border: 1px solid #ddd; padding: 10px; text-align: left;}
+      th {background: #3498db; color: white;}
+      tr:nth-child(even) {background: #f2f2f2;}
+      select {padding: 5px;}
+     .msg {background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; margin-bottom: 15px;}
+     .key-info {background: #fff3cd; padding: 10px; border-radius: 4px; margin-bottom: 15px;}
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Admin Dashboard - Lead Management</h1>
+      <nav><a href="/">Contact Form</a> <a href="/admin?key=${ADMIN_KEY}">Refresh</a></nav>
+      <div class="key-info"><b>Admin Key:</b> ${ADMIN_KEY} | Add <code>?key=${ADMIN_KEY}</code> to URL for access</div>
+      ${msg? `<div class="msg">${msg}</div>` : ''}
+      <h2>Total Leads: ${leads.length}</h2>
+      ${leads.length === 0? '<p>No leads yet. Submit from Contact Form.</p>' : `
+      <table>
+        <thead><tr><th>Name</th><th>Email</th><th>Source</th><th>Created</th><th>Follow-ups</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      `}
+    </div>
+  </body>
+  </html>
+  `);
+});
+
+// 5. Start Server
+app.listen(PORT, () => {
+  console.log(`Mini CRM running on http://localhost:${PORT}`);
+  console.log(`Admin Key: ${ADMIN_KEY}`);
+  console.log(`Open: http://localhost:${PORT}`);
+});
